@@ -18,6 +18,9 @@ MTK_BUILD_MANIFOLD(state_ikfom,
 ((vect3, bg))
 ((vect3, ba))
 ((S2, grav))
+((SO3, rot_gps_imu))
+((vect3, pos_gps_imu))
+((vect3, bias_gps))
 );
 
 MTK_BUILD_MANIFOLD(input_ikfom,
@@ -30,6 +33,7 @@ MTK_BUILD_MANIFOLD(process_noise_ikfom,
 ((vect3, na))
 ((vect3, nbg))
 ((vect3, nba))
+((vect3, noise_bias_gps))
 );
 
 MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
@@ -39,14 +43,15 @@ MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 	MTK::setDiagonal<process_noise_ikfom, vect3, 3>(cov, &process_noise_ikfom::na, 0.0001); // *dt 0.01 0.01 * dt * dt 0.05
 	MTK::setDiagonal<process_noise_ikfom, vect3, 6>(cov, &process_noise_ikfom::nbg, 0.00001); // *dt 0.00001 0.00001 * dt *dt 0.3 //0.001 0.0001 0.01
 	MTK::setDiagonal<process_noise_ikfom, vect3, 9>(cov, &process_noise_ikfom::nba, 0.00001);   //0.001 0.05 0.0001/out 0.01
+	MTK::setDiagonal<process_noise_ikfom, vect3, 12>(cov, &process_noise_ikfom::noise_bias_gps, 0.00001);   //0.001 0.05 0.0001/out 0.01
 	return cov;
 }
 
 //double L_offset_to_I[3] = {0.04165, 0.02326, -0.0284}; // Avia 
 //vect3 Lidar_offset_to_IMU(L_offset_to_I, 3);
-Eigen::Matrix<double, 24, 1> get_f(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, 33, 1> get_f(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 24, 1> res = Eigen::Matrix<double, 24, 1>::Zero();
+	Eigen::Matrix<double, 33, 1> res = Eigen::Matrix<double, 33, 1>::Zero();
 	vect3 omega;
 	in.gyro.boxminus(omega, s.bg);
 	vect3 a_inertial = s.rot * (in.acc-s.ba); 
@@ -58,9 +63,9 @@ Eigen::Matrix<double, 24, 1> get_f(state_ikfom &s, const input_ikfom &in)
 	return res;
 }
 
-Eigen::Matrix<double, 24, 23> df_dx(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, 33, 32> df_dx(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 24, 23> cov = Eigen::Matrix<double, 24, 23>::Zero();
+	Eigen::Matrix<double, 33, 32> cov = Eigen::Matrix<double, 33, 32>::Zero();
 	cov.template block<3, 3>(0, 12) = Eigen::Matrix3d::Identity();
 	vect3 acc_;
 	in.acc.boxminus(acc_, s.ba);
@@ -77,13 +82,14 @@ Eigen::Matrix<double, 24, 23> df_dx(state_ikfom &s, const input_ikfom &in)
 }
 
 
-Eigen::Matrix<double, 24, 12> df_dw(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, 33, 15> df_dw(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 24, 12> cov = Eigen::Matrix<double, 24, 12>::Zero();
+	Eigen::Matrix<double, 33, 15> cov = Eigen::Matrix<double, 33, 15>::Zero();
 	cov.template block<3, 3>(12, 3) = -s.rot.toRotationMatrix();
 	cov.template block<3, 3>(3, 0) = -Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(15, 6) = Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(18, 9) = Eigen::Matrix3d::Identity();
+	cov.template bottomRightCorner(3, 3) = Eigen::Matrix3d::Identity();
 	return cov;
 }
 

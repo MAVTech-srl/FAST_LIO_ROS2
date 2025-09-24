@@ -131,7 +131,7 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
-esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
+esekfom::esekf<state_ikfom, 15 /*process noises*/, input_ikfom> kf;
 state_ikfom state_point;
 vect3 pos_lid;
 
@@ -757,8 +757,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
-    ekfom_data.h.resize(effct_feat_num);
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num + 3, 21); //23 33
+    ekfom_data.h.resize(effct_feat_num + 3);
 
     for (int i = 0; i < effct_feat_num; i++)
     {
@@ -790,6 +790,19 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
     }
+    ekfom_data.h.tail(3)= s.rot_gps_imu * s.pos + s.pos_gps_imu - s.bias_gps;  // noise_gps
+    M3D ROT_gps_imu(s.rot_gps_imu);
+    ekfom_data.h_x.block<3, 3>(effct_feat_num, 2) << ROT_gps_imu;
+    M3D POS = s.pos.asDiagonal();
+    M3D pos_crossmat;
+    pos_crossmat << SKEW_SYM_MATRX(s.pos);
+    ekfom_data.h_x.block<3, 3>(effct_feat_num, 23) << -ROT_gps_imu * pos_crossmat - POS;
+    ekfom_data.h_x.block<3, 3>(effct_feat_num, 26) << Eigen::Matrix3d::Identity();
+    ekfom_data.h_x.block<3, 3>(effct_feat_num, 29) << -Eigen::Matrix3d::Identity();
+    /* 
+        Matrix h_v is not implemented, nor R is. It seems they consider measurement noise equal to zero
+    */
+
     solve_time += omp_get_wtime() - solve_start_;
 }
 
