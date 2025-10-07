@@ -107,6 +107,9 @@ vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+deque<nav_msgs::msg::Odometry::ConstSharedPtr> odom_buffer;
+size_t odom_msg_count = 0;
+Vector3d initial_position;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -131,7 +134,7 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
-esekfom::esekf<state_ikfom, 15 /*process noises*/, input_ikfom> kf;
+esekfom::esekf<state_ikfom, 12 /*process noises*/, input_ikfom> kf;
 state_ikfom state_point;
 vect3 pos_lid;
 
@@ -377,6 +380,39 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
+/*
+    Odometry callback. Odometry coming from the autopilot is saved into a deque.
+*/
+void odom_cbk(const nav_msgs::msg::Odometry::UniquePtr msg_in)
+{
+    // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
+    nav_msgs::msg::Odometry::SharedPtr msg(new nav_msgs::msg::Odometry(*msg_in));
+    
+
+    // msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
+    // if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
+    // {
+    //     msg->header.stamp = \
+    //     rclcpp::Time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
+    // }
+
+    double timestamp = get_time_sec(msg->header.stamp);
+
+    mtx_buffer.lock();  // Is it really needed?
+
+    // What's this piece of code? I don't think we need it
+    // if (timestamp < last_timestamp_imu)
+    // {
+    //     std::cerr << "lidar loop back, clear odometry buffer" << std::endl;
+    //     odom_buffer.clear();
+    // }
+
+    // last_timestamp_imu = timestamp;
+
+    odom_buffer.push_back(msg);
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+}
 
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
@@ -428,6 +464,39 @@ bool sync_packages(MeasureGroup &meas)
         imu_buffer.pop_front();
     }
 
+    // Push odometry data if there's any new
+    if (odom_msg_count == 0)
+    {
+        if (odom_buffer.empty()) return false;
+        meas.px4_position = VectorXd::Zero(3);
+        initial_position << odom_buffer.front()->pose.pose.position.x,
+                            odom_buffer.front()->pose.pose.position.y,
+                            odom_buffer.front()->pose.pose.position.z;
+        odom_buffer.pop_front();
+        odom_msg_count++;
+
+    }
+    else
+    {
+        if (!odom_buffer.empty())
+        {
+            double odom_time = get_time_sec(odom_buffer.front()->header.stamp);
+            if (odom_time <= lidar_end_time)
+            {
+                Vector3d actual_position(   odom_buffer.front()->pose.pose.position.x,
+                                            odom_buffer.front()->pose.pose.position.y,
+                                            odom_buffer.front()->pose.pose.position.z);
+                meas.px4_position = actual_position - initial_position;
+                // Now rotate it to align with the lidar RF
+                // Eigen::Quaterniond q(-0.67, -0.4645, -0.0189, 0.3232);
+                // Matrix3d rot_mat = q.normalized().toRotationMatrix();
+                // meas.px4_position = rot_mat.transpose() * meas.px4_position;
+                odom_buffer.pop_front();
+                odom_msg_count++;
+            }
+
+        }
+    }
     lidar_buffer.pop_front();
     time_buffer.pop_front();
     lidar_pushed = false;
@@ -757,8 +826,12 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num + 3, 21); //23 33
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num + 3, 29); // 23 33
     ekfom_data.h.resize(effct_feat_num + 3);
+    ekfom_data.z.resize(effct_feat_num + 3);
+    ekfom_data.z.setZero();
+    ekfom_data.R.resize(effct_feat_num + 3, effct_feat_num + 3);
+    ekfom_data.R.setZero();
 
     for (int i = 0; i < effct_feat_num; i++)
     {
@@ -790,15 +863,19 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
     }
-    ekfom_data.h.tail(3)= s.rot_gps_imu * s.pos + s.pos_gps_imu - s.bias_gps;  // noise_gps
+    // ekfom_data.h.tail(3)= s.rot_gps_imu * s.pos + s.pos_gps_imu - s.bias_gps;  // noise_gps
+    ekfom_data.h.tail(3) = s.rot_gps_imu * s.pos + s.pos_gps_imu; //s.rot_gps_imu * s.pos + s.pos_gps_imu;  // estimated measurement = residual (z in the paper)
+    ekfom_data.z.tail(3) = Measures.px4_position;   // THIS IS THE MEASUREMENT FROM MAVROS! put here the element taken from the odom_buffer deque directly as it is global variable
     M3D ROT_gps_imu(s.rot_gps_imu);
-    ekfom_data.h_x.block<3, 3>(effct_feat_num, 2) << ROT_gps_imu;
+    ekfom_data.h_x.block<3, 3>(effct_feat_num, 0) << ROT_gps_imu;
     M3D POS = s.pos.asDiagonal();
     M3D pos_crossmat;
     pos_crossmat << SKEW_SYM_MATRX(s.pos);
-    ekfom_data.h_x.block<3, 3>(effct_feat_num, 23) << -ROT_gps_imu * pos_crossmat - POS;
+    ekfom_data.h_x.block<3, 3>(effct_feat_num, 23) << -ROT_gps_imu * pos_crossmat;// - POS;
     ekfom_data.h_x.block<3, 3>(effct_feat_num, 26) << Eigen::Matrix3d::Identity();
-    ekfom_data.h_x.block<3, 3>(effct_feat_num, 29) << -Eigen::Matrix3d::Identity();
+    // ekfom_data.h_x.block<3, 3>(effct_feat_num, 29) << -Eigen::Matrix3d::Identity();
+    ekfom_data.R.block(0, 0, effct_feat_num, effct_feat_num) = LASER_POINT_COV * VectorXd::Ones(effct_feat_num).asDiagonal();
+    ekfom_data.R.bottomRightCorner(3, 3) = 0.1 * VectorXd::Ones(3).asDiagonal();    // The value is high because the odometry from px4 has LOW ACCURACY!
     /* 
         Matrix h_v is not implemented, nor R is. It seems they consider measurement noise equal to zero
     */
@@ -939,7 +1016,11 @@ public:
         {
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
         }
+        rmw_qos_profile_t qos_profile = rmw_qos_profile_sensor_data;
+        auto qos = rclcpp::QoS(rclcpp::QoSInitialization(qos_profile.history, 5), qos_profile);
+
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
+        sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/local_position/odom", qos, odom_cbk);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
@@ -1062,7 +1143,7 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            kf.update_iterated_dyn_share_modified(solve_H_time);
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1149,6 +1230,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_odom_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
     rclcpp::Subscription<livox_interfaces::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
 
