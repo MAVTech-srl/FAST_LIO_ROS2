@@ -24,6 +24,9 @@
             scan_rate: 10
 
         mapping:
+            mapping.measurement_noise_covariance_x": 0.001
+            mapping.measurement_noise_covariance_y": 0.001
+            mapping.measurement_noise_covariance_z": 0.05
             acc_cov: 0.1
             gyr_cov: 0.1
             b_acc_cov: 0.0001

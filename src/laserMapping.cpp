@@ -87,6 +87,8 @@ condition_variable sig_buffer;
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
 
+
+double MEAS_NOISE_COV_X = 0.1, MEAS_NOISE_COV_Y = 0.1, MEAS_NOISE_COV_Z = 0.1;
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
@@ -875,7 +877,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     ekfom_data.h_x.block<3, 3>(effct_feat_num, 26) << Eigen::Matrix3d::Identity();
     // ekfom_data.h_x.block<3, 3>(effct_feat_num, 29) << -Eigen::Matrix3d::Identity();
     ekfom_data.R.block(0, 0, effct_feat_num, effct_feat_num) = LASER_POINT_COV * VectorXd::Ones(effct_feat_num).asDiagonal();
-    ekfom_data.R.bottomRightCorner(3, 3) = 0.1 * VectorXd::Ones(3).asDiagonal();    // The value is high because the odometry from px4 has LOW ACCURACY!
+    ekfom_data.R.bottomRightCorner(3, 3) = Vector3d(MEAS_NOISE_COV_X, MEAS_NOISE_COV_Y, MEAS_NOISE_COV_Z).asDiagonal();    // The value is high because the odometry from px4 has LOW ACCURACY!
     /* 
         Matrix h_v is not implemented, nor R is. It seems they consider measurement noise equal to zero
     */
@@ -910,6 +912,9 @@ public:
         this->declare_parameter<double>("mapping.acc_cov", 0.1);
         this->declare_parameter<double>("mapping.b_gyr_cov", 0.0001);
         this->declare_parameter<double>("mapping.b_acc_cov", 0.0001);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_x", 0.1);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_y", 0.1);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_z", 0.1);
         this->declare_parameter<double>("preprocess.blind", 0.01);
         this->declare_parameter<int>("preprocess.lidar_type", AVIA);
         this->declare_parameter<int>("preprocess.scan_line", 16);
@@ -946,6 +951,9 @@ public:
         this->get_parameter_or<double>("mapping.acc_cov",acc_cov,0.1);
         this->get_parameter_or<double>("mapping.b_gyr_cov",b_gyr_cov,0.0001);
         this->get_parameter_or<double>("mapping.b_acc_cov",b_acc_cov,0.0001);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_x", MEAS_NOISE_COV_X, 0.1);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_y", MEAS_NOISE_COV_Y, 0.1);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_z", MEAS_NOISE_COV_Z, 0.1);
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.lidar_type", p_pre->lidar_type, AVIA);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
