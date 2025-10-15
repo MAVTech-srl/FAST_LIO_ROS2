@@ -62,6 +62,7 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     PointCloudXYZI::Ptr lidar;
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
     Vector3d px4_position;
+    Matrix3d px4_position_cov;
 };
 
 struct StatesGroup

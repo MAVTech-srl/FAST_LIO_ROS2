@@ -471,6 +471,9 @@ bool sync_packages(MeasureGroup &meas)
     {
         if (odom_buffer.empty()) return false;
         meas.px4_position = VectorXd::Zero(3);
+        meas.px4_position_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
+                                            odom_buffer.front()->pose.covariance[7],
+                                            odom_buffer.front()->pose.covariance[14]).asDiagonal();
         initial_position << odom_buffer.front()->pose.pose.position.x,
                             odom_buffer.front()->pose.pose.position.y,
                             odom_buffer.front()->pose.pose.position.z;
@@ -489,6 +492,9 @@ bool sync_packages(MeasureGroup &meas)
                                             odom_buffer.front()->pose.pose.position.y,
                                             odom_buffer.front()->pose.pose.position.z);
                 meas.px4_position = actual_position - initial_position;
+                meas.px4_position_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
+                                            odom_buffer.front()->pose.covariance[7],
+                                            odom_buffer.front()->pose.covariance[14]).asDiagonal();
                 // Now rotate it to align with the lidar RF
                 // Eigen::Quaterniond q(-0.67, -0.4645, -0.0189, 0.3232);
                 // Matrix3d rot_mat = q.normalized().toRotationMatrix();
@@ -875,11 +881,12 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     pos_crossmat << SKEW_SYM_MATRX(s.pos);
     ekfom_data.h_x.block<3, 3>(effct_feat_num, 23) << -ROT_gps_imu * pos_crossmat;// - POS;
     ekfom_data.h_x.block<3, 3>(effct_feat_num, 26) << Eigen::Matrix3d::Identity();
-    // ekfom_data.h_x.block<3, 3>(effct_feat_num, 29) << -Eigen::Matrix3d::Identity();
     ekfom_data.R.block(0, 0, effct_feat_num, effct_feat_num) = LASER_POINT_COV * VectorXd::Ones(effct_feat_num).asDiagonal();
-    ekfom_data.R.bottomRightCorner(3, 3) = Vector3d(MEAS_NOISE_COV_X, MEAS_NOISE_COV_Y, MEAS_NOISE_COV_Z).asDiagonal();    // The value is high because the odometry from px4 has LOW ACCURACY!
+    // ekfom_data.R.bottomRightCorner(3, 3) = Vector3d(MEAS_NOISE_COV_X, MEAS_NOISE_COV_Y, MEAS_NOISE_COV_Z).asDiagonal();    // The value is high because the odometry from px4 has LOW ACCURACY!
+    // Use the covariance on the position given directly by the PX4 EKF
+    ekfom_data.R.bottomRightCorner(3, 3) = Measures.px4_position_cov;
     /* 
-        Matrix h_v is not implemented, nor R is. It seems they consider measurement noise equal to zero
+        Matrix h_v is not implemented.
     */
 
     solve_time += omp_get_wtime() - solve_start_;
@@ -1028,7 +1035,8 @@ public:
         auto qos = rclcpp::QoS(rclcpp::QoSInitialization(qos_profile.history, 5), qos_profile);
 
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
-        sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/local_position/odom", qos, odom_cbk);
+        // sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/local_position/odom", qos, odom_cbk);
+        sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/odometry/in", qos, odom_cbk);   // odometry/in has the covariance data given by the PX4 EKF
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
