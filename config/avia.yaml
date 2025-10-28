@@ -33,6 +33,10 @@
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
+            measurement_noise_covariance_x: 0.1
+            measurement_noise_covariance_y: 0.1
+            measurement_noise_covariance_z: 0.1
+            use_ekf2_covariance: false
 
         publish:
             path_en:  false
