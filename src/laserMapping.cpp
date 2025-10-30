@@ -496,8 +496,8 @@ bool sync_packages(MeasureGroup &meas)
                 meas.px4_position_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
                                             odom_buffer.front()->pose.covariance[7],
                                             odom_buffer.front()->pose.covariance[14]).asDiagonal();
-                // Now rotate it to align with the lidar RF
-                // Eigen::Quaterniond q(-0.67, -0.4645, -0.0189, 0.3232);
+                // // Now rotate it to align with the lidar RF
+                // Eigen::Quaterniond q(-0.4231, 0.5666, 0.5666, 0.4231);     // Order: w, x, y, z
                 // Matrix3d rot_mat = q.normalized().toRotationMatrix();
                 // meas.px4_position = rot_mat.transpose() * meas.px4_position;
                 odom_buffer.pop_front();
@@ -877,11 +877,15 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     ekfom_data.z.tail(3) = Measures.px4_position;   // THIS IS THE MEASUREMENT FROM MAVROS! put here the element taken from the odom_buffer deque directly as it is global variable
     M3D ROT_gps_imu(s.rot_gps_imu);
     ekfom_data.h_x.block<3, 3>(effct_feat_num, 0) << ROT_gps_imu;
-    M3D POS = s.pos.asDiagonal();
-    M3D pos_crossmat;
-    pos_crossmat << SKEW_SYM_MATRX(s.pos);
-    ekfom_data.h_x.block<3, 3>(effct_feat_num, 23) << -ROT_gps_imu * pos_crossmat;// - POS;
-    ekfom_data.h_x.block<3, 3>(effct_feat_num, 26) << Eigen::Matrix3d::Identity();
+    // M3D POS = s.pos.asDiagonal();
+    if (extrinsic_est_en)
+    {
+        // If we chose to estimate the extrinsics, we populate the h_x matrix in the positions relative to the derivatives wrt those extrinsics
+        M3D pos_crossmat;
+        pos_crossmat << SKEW_SYM_MATRX(s.pos);
+        ekfom_data.h_x.block<3, 3>(effct_feat_num, 23) << -ROT_gps_imu * pos_crossmat;// - POS;
+        ekfom_data.h_x.block<3, 3>(effct_feat_num, 26) << Eigen::Matrix3d::Identity();
+    }
     ekfom_data.R.block(0, 0, effct_feat_num, effct_feat_num) = LASER_POINT_COV * VectorXd::Ones(effct_feat_num).asDiagonal();
     
     if (use_ekf2_cov)
