@@ -1636,6 +1636,10 @@ public:
 			dyn_share.valid = true;	
 			h_dyn_share(x_, dyn_share);
 
+			// Even if I don't have any effective points, I keep solving the KF using the odometry from PX4
+			// !!!!! I CANNOT DO IT LIKE THIS!! I DON'T HAVE ANY MEASUREMENT OF THE ORIENTATION, I HAVE ONLY POSITION!
+			// Maybe I can use odometry if this becomes not valid
+			// NOTE: GET RID OF THE return IN laserMapping.cpp LINE 843 to have h, h_x and R correctly filled
 			if(! dyn_share.valid)
 			{
 				continue; 
@@ -1738,7 +1742,27 @@ public:
 
 			
 				// Our code
-				K_ = P_ * h_x_.transpose() * (h_x_ * P_ * h_x_.transpose() + R).inverse();
+				VectorXd R_diagonal = VectorXd(dof_Measurement);
+				R_diagonal << VectorXd::Constant(dof_Measurement - 9, R(0,0)), 
+								R(1,1),
+								R(2,2), 
+								R(3,3),
+								R(4,4),
+								R(5,5),
+								R(6,6),
+								R(7,7),
+								R(8,8),
+								R(9,9);
+				// R_diagonal << 	R(1,1), 
+				// 				R(2,2), 
+				// 				R(3,3),
+				// 				R(4,4),
+				// 				R(5,5),
+				// 				R(6,6),
+				// 				R(7,7),
+				// 				R(8,8),
+				// 				R(9,9); // If I am discarding the lidar measurements
+				K_ = P_ * h_x_.transpose() * (h_x_ * P_ * h_x_.transpose() + R_diagonal.asDiagonal().toDenseMatrix()).inverse();	// It's ok to invert R because we have small matrices here
 				K_h = K_ * dyn_share.h;
 				K_x = K_ * h_x_;
 			}
@@ -1796,20 +1820,89 @@ public:
 				// //K_= (h_x_.transpose() * h_x_ + (P_/R).inverse()).inverse()*h_x_.transpose();
 
 				// Our code
-				K_ = (h_x_.transpose() * R.inverse() * h_x_ + P_.inverse()).inverse() * h_x_.transpose() * R.inverse();
+				VectorXd inv_R_diagonal = VectorXd(dof_Measurement);
+				inv_R_diagonal << VectorXd::Constant(dof_Measurement - 9, 1 / R(0,0)), 
+									1 / R(1,1), 
+									1 / R(2,2), 
+									1 / R(3,3),
+									1 / R(4,4),
+									1 / R(5,5),
+									1 / R(6,6),
+									1 / R(7,7),
+									1 / R(8,8),
+									1 / R(9,9);
+				// inv_R_diagonal << 1 / R(1,1), 
+				// 					1 / R(2,2), 
+				// 					1 / R(3,3),
+				// 					1 / R(4,4),
+				// 					1 / R(5,5),
+				// 					1 / R(6,6),
+				// 					1 / R(7,7),
+				// 					1 / R(8,8),
+				// 					1 / R(9,9);
+				K_ = (h_x_.transpose() * inv_R_diagonal.asDiagonal().toDenseMatrix() * h_x_ + P_.inverse()).inverse() * h_x_.transpose() * inv_R_diagonal.asDiagonal();
 				K_h = K_ * dyn_share.h;
 				K_x = K_ * h_x_;
 			#endif 
 			}
 
 			//K_x = K_ * h_x_;
-			Matrix<scalar_type, n, 1> dx_ = -K_ * (dyn_share.z - dyn_share.h) + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; // eq 18 FAST-LIO. The term (z-h) is found at line 1111
+			// // NOTE: When ignoring scan use these lines below...
+			// VectorXd innovation(dof_Measurement);
+			// innovation.head(3) = dyn_share.z.head(3) - dyn_share.h.head(3);
+			// Quaterniond q_measured;
+			// q_measured.w() = 1 - dyn_share.z.segment(3, 3).norm();
+			// q_measured.vec() = dyn_share.z.segment(3, 3);
+			// q_measured.normalize();
+			// Quaterniond q_model;
+			// q_model.w() = 1 - dyn_share.h.segment(3, 3).norm();
+			// q_model.vec() = dyn_share.h.segment(3, 3);
+			// q_model.normalize();
+			// // Using directly quaternions to compute the error quat
+			// // Matrix3d q_meas_skew = SKEW_SYM_MATRX(q_measured.vec());
+			// q_model = q_model.conjugate();
+			// Vector3d q_error_vec = q_measured.w() * q_model.vec() + q_model.w() * q_measured.vec() + q_measured.vec().cross(q_model.vec());
+			// innovation.segment(3, 3) = q_error_vec;
+			// // innovation.segment(3, 3) = Quaterniond(q_measured.normalized().matrix() * q_model.normalized().matrix().transpose()).normalized().vec();
+			// innovation.tail(3) = dyn_share.z.tail(3) - dyn_share.h.tail(3);
+			// // ...until here
+
+			VectorXd innovation(dof_Measurement);
+
+			// Using quaternions:
+			innovation.head(dof_Measurement - 9) = /*dyn_share.z.head(dof_Measurement - 9)*/ - dyn_share.h.head(dof_Measurement - 9);
+			// Comparing quaternions:
+			innovation.segment(dof_Measurement - 9, 3) = dyn_share.z.segment(dof_Measurement - 9, 3) - dyn_share.h.segment(dof_Measurement - 9, 3);
+			Quaterniond q_measured;
+			q_measured.w() = 1.0 - dyn_share.z.segment(dof_Measurement - 6, 3).norm();
+			q_measured.vec() = dyn_share.z.segment(dof_Measurement - 6, 3);
+			q_measured.normalize();
+			Quaterniond q_model;
+			q_model.w() = 1.0 - dyn_share.h.segment(dof_Measurement - 6, 3).norm();
+			q_model.vec() = dyn_share.h.segment(dof_Measurement - 6, 3);
+			q_model.normalize();
+			// Using directly quaternions to compute the error quat
+			Quaterniond q_model_conj = q_model.conjugate();
+			Vector3d q_error_vec = q_measured.w() * q_model_conj.vec() + q_model_conj.w() * q_measured.vec() + q_measured.vec().cross(q_model_conj.vec());
+			innovation.segment(dof_Measurement - 6, 3) = q_error_vec.normalized();
+			innovation.tail(3) = dyn_share.z.tail(3) - dyn_share.h.tail(3);
+
+			// Using euler angles instead:
+			// innovation = dyn_share.z - dyn_share.h;
+			
+
+			// In questa differenza (z-h) devo considerare che c'è un quaternione! Devo calcolare il quaternione errore e normalizzarlo, poi moltiplico per K_
+			// Matrix<scalar_type, n, 1> dx_ = K_ * (dyn_share.z - dyn_share.h) + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; // eq 18 FAST-LIO. The term (z-h) is found at line 1111
+			Matrix<scalar_type, n, 1> dx_ = K_ * innovation + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; // eq 18 FAST-LIO. The term (z-h) is found at line 1111
 			state x_before = x_;
 			x_.boxplus(dx_);
+			x_.rot.normalize();
+			x_.rot_gps_imu.normalize();
+			// x_.offset_R_L_I.normalize();
 			dyn_share.converge = true;
-			for(int i = 0; i < n ; i++)
+			for(int jj = 0; jj < n ; jj++)
 			{
-				if(std::fabs(dx_[i]) > limit[i])
+				if(std::fabs(dx_[jj]) > 0.0001 /*limit[i]*/) // If the increment of at least one dx is bigger than limit[], then the kf did not converge yet
 				{
 					dyn_share.converge = false;
 					break;
@@ -1821,11 +1914,15 @@ public:
 			{
 				dyn_share.converge = true;
 			}
-
+			// std::cout << "iteration time t=" << t << ", i=" << i << ". Is converged: " << dyn_share.converge << std::endl;
 			if(t > 1 || i == maximum_iter - 1)
 			{
 				L_ = P_;
-				//std::cout << "iteration time" << t << "," << i << std::endl; 
+				// if (i == maximum_iter - 1)
+				// {
+					std::cout << "iteration time t=" << t << ", i=" << i << std::endl; 
+				// }
+				// std::cout << "Projecting P in the correct state space..." << std::endl;
 				Matrix<scalar_type, 3, 3> res_temp_SO3;
 				MTK::vect<3, scalar_type> seg_SO3;
 				for(typename std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {

@@ -62,9 +62,10 @@
 #include <livox_interfaces/msg/custom_msg.hpp>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
+#include <random>
 
 #define INIT_TIME           (0.1)
-#define LASER_POINT_COV     (0.001)
+// #define LASER_POINT_COV     (0.001)
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
@@ -87,9 +88,15 @@ condition_variable sig_buffer;
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
 
+std::random_device rd;
+std::mt19937 e2(rd());
+// std::normal_distribution<double> dist(0, (0.001));
 
-double MEAS_NOISE_COV_X = 0.1, MEAS_NOISE_COV_Y = 0.1, MEAS_NOISE_COV_Z = 0.1;
+double MEAS_NOISE_COV_X = 0.1, MEAS_NOISE_COV_Y = 0.1, MEAS_NOISE_COV_Z = 0.1, LASER_POINT_COV = 0.001;
+double MEAS_NOISE_COV_VEL_X = 0.1, MEAS_NOISE_COV_VEL_Y = 0.1, MEAS_NOISE_COV_VEL_Z = 0.1;
+double MEAS_NOISE_COV_Q_W = 0.0001, MEAS_NOISE_COV_Q_X = 0.0001, MEAS_NOISE_COV_Q_Y = 0.0001, MEAS_NOISE_COV_Q_Z = 0.0001;
 bool use_ekf2_cov = false;
+bool use_odom_in = false;
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
@@ -113,6 +120,7 @@ deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
 deque<nav_msgs::msg::Odometry::ConstSharedPtr> odom_buffer;
 size_t odom_msg_count = 0;
 Vector3d initial_position;
+Quaterniond initial_orientation;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -336,7 +344,7 @@ void livox_pcl_cbk(const livox_interfaces::msg::CustomMsg::UniquePtr msg)
         printf("IMU and LiDAR not Synced, IMU time: %lf, lidar header time: %lf \n",last_timestamp_imu, last_timestamp_lidar);
     }
 
-    if (time_sync_en && !timediff_set_flg && abs(last_timestamp_lidar - last_timestamp_imu) > 1 && !imu_buffer.empty())
+    if (time_sync_en && !timediff_set_flg && abs(last_timestamp_lidar - last_timestamp_imu) > 0.01 && !imu_buffer.empty())
     {
         timediff_set_flg = true;
         timediff_lidar_wrt_imu = last_timestamp_lidar + 0.1 - last_timestamp_imu;
@@ -345,7 +353,7 @@ void livox_pcl_cbk(const livox_interfaces::msg::CustomMsg::UniquePtr msg)
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
-    lidar_buffer.push_back(ptr);
+    lidar_buffer.push_back(ptr);        // This buffer is somehow emptied each time it's consumed, but I cannot find where it's emptied...
     time_buffer.push_back(last_timestamp_lidar);
     
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
@@ -411,7 +419,7 @@ void odom_cbk(const nav_msgs::msg::Odometry::UniquePtr msg_in)
     // }
 
     // last_timestamp_imu = timestamp;
-
+    odom_buffer.clear();    // Clearing queue as I want only the last, most recent odometry data 
     odom_buffer.push_back(msg);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -421,7 +429,7 @@ double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
 {
-    if (lidar_buffer.empty() || imu_buffer.empty()) {
+    if (lidar_buffer.empty() || imu_buffer.empty() || odom_buffer.empty()) {
         return false;
     }
 
@@ -435,7 +443,7 @@ bool sync_packages(MeasureGroup &meas)
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
             std::cerr << "Too few input point cloud!\n";
         }
-        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
+        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime) // use curvature as time of each laser points, curvature unit: ms
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
         }
@@ -470,42 +478,84 @@ bool sync_packages(MeasureGroup &meas)
     // Push odometry data if there's any new
     if (odom_msg_count == 0)
     {
-        if (odom_buffer.empty()) return false;
+        // if (odom_buffer.empty()) return false;
         meas.px4_position = VectorXd::Zero(3);
         meas.px4_position_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
                                             odom_buffer.front()->pose.covariance[7],
                                             odom_buffer.front()->pose.covariance[14]).asDiagonal();
+        meas.px4_velocity = Vector3d(odom_buffer.front()->twist.twist.linear.x,
+                                        odom_buffer.front()->twist.twist.linear.y,
+                                        odom_buffer.front()->twist.twist.linear.z);
+        meas.px4_velocity_cov = Vector3d(odom_buffer.front()->twist.covariance[0],
+                                            odom_buffer.front()->twist.covariance[7],
+                                            odom_buffer.front()->twist.covariance[14]).asDiagonal();
         initial_position << odom_buffer.front()->pose.pose.position.x,
                             odom_buffer.front()->pose.pose.position.y,
                             odom_buffer.front()->pose.pose.position.z;
+        // Save initial orientation
+        initial_orientation = Quaterniond(odom_buffer.front()->pose.pose.orientation.w,
+                                odom_buffer.front()->pose.pose.orientation.x,
+                                odom_buffer.front()->pose.pose.orientation.y,
+                                odom_buffer.front()->pose.pose.orientation.z);
+        meas.px4_pose = Quaterniond(1.0, 0.0, 0.0, 0.0);
+        meas.px4_angular_speed = Vector3d(odom_buffer.front()->twist.twist.angular.x,
+                                            odom_buffer.front()->twist.twist.angular.y,
+                                            odom_buffer.front()->twist.twist.angular.z);
+        std::cout << "Initial position:\n" << initial_position << "\nInitial pose:\n" << initial_orientation << std::endl;
         odom_buffer.pop_front();
         odom_msg_count++;
 
     }
     else
     {
-        if (!odom_buffer.empty())
-        {
+        // if (!odom_buffer.empty())
+        // {
             double odom_time = get_time_sec(odom_buffer.front()->header.stamp);
-            if (odom_time <= lidar_end_time)
-            {
-                Vector3d actual_position(   odom_buffer.front()->pose.pose.position.x,
-                                            odom_buffer.front()->pose.pose.position.y,
-                                            odom_buffer.front()->pose.pose.position.z);
+            // if (odom_time <= lidar_end_time)     // This in SITL was always false!!! Maybe also in real experiments? CHECK THIS
+            // {
+                Vector3d actual_position(   odom_buffer.front()->pose.pose.position.x, // + dist(e2),
+                                            odom_buffer.front()->pose.pose.position.y, // + dist(e2),
+                                            odom_buffer.front()->pose.pose.position.z); // + dist(e2));
                 meas.px4_position = actual_position - initial_position;
                 meas.px4_position_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
                                             odom_buffer.front()->pose.covariance[7],
                                             odom_buffer.front()->pose.covariance[14]).asDiagonal();
+                // Populate linear velocity
+                meas.px4_velocity = Vector3d(odom_buffer.front()->twist.twist.linear.x,
+                                                odom_buffer.front()->twist.twist.linear.y,
+                                                odom_buffer.front()->twist.twist.linear.z);
+                meas.px4_velocity_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
+                                            odom_buffer.front()->pose.covariance[7],
+                                            odom_buffer.front()->pose.covariance[14]).asDiagonal();
+                // Populate pose
+                meas.px4_pose = Quaterniond(odom_buffer.front()->pose.pose.orientation.w,
+                                            odom_buffer.front()->pose.pose.orientation.x,
+                                            odom_buffer.front()->pose.pose.orientation.y,
+                                            odom_buffer.front()->pose.pose.orientation.z);
+                meas.px4_pose_cov = Vector3d(odom_buffer.front()->pose.covariance[21],
+                                            odom_buffer.front()->pose.covariance[28],
+                                            odom_buffer.front()->pose.covariance[35]).asDiagonal();
+                // NOTE: SUBTRACT THE INITIAL ORIENTATION!
+                // This is an extrinsic rotation because I want to apply the initial rotation (inversed) to the actual axes wrt inertial RF
+                Matrix3d actual_pose = initial_orientation.normalized().toRotationMatrix().transpose() * meas.px4_pose.normalized().toRotationMatrix();
+                meas.px4_pose = Quaterniond(actual_pose) ;
+                meas.px4_pose.normalize();
+                // Populate angular velocity
+                meas.px4_angular_speed = Vector3d(odom_buffer.front()->twist.twist.angular.x,
+                                                    odom_buffer.front()->twist.twist.angular.y,
+                                                    odom_buffer.front()->twist.twist.angular.z);    // BUG: Maybe this is wrong because it does not take into account the initial orientation bias!!
                 // // Now rotate it to align with the lidar RF
                 // Eigen::Quaterniond q(-0.4231, 0.5666, 0.5666, 0.4231);     // Order: w, x, y, z
                 // Matrix3d rot_mat = q.normalized().toRotationMatrix();
                 // meas.px4_position = rot_mat.transpose() * meas.px4_position;
+                // std::cout << "Just read from mavlink:\n" << meas.px4_position << std::endl;
                 odom_buffer.pop_front();
                 odom_msg_count++;
-            }
+            // }
 
-        }
+        // }
     }
+    // std::cout << "Init pos is:\n" << initial_position << std::endl;
     lidar_buffer.pop_front();
     time_buffer.pop_front();
     lidar_pushed = false;
@@ -794,6 +844,9 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         point_selected_surf[i] = false;
         if (esti_plane(pabcd, points_near, 0.1f))
         {
+            // See: https://stackoverflow.com/questions/1400213/3d-least-squares-plane
+            // float pd2 = pabcd(0) * point_world.x + pabcd(1) * point_world.y + pabcd(2) * point_world.z + pabcd(3);  // This is the signed "distance" from the plane! They omitted the denominator (which is sqrt(A²+B²+C²))
+            // float pd2 = pabcd(0) * (points_near[0].x - point_world.x) + pabcd(1) * (points_near[0].y - point_world.y) + pabcd(2) * (points_near[0].z - point_world.z); // - pabcd(3); // Why + D instead of - D?  // This is the signed "distance" from the plane! They omitted the denominator (which is sqrt(A²+B²+C²))
             float pd2 = pabcd(0) * point_world.x + pabcd(1) * point_world.y + pabcd(2) * point_world.z + pabcd(3);
             float s = 1 - 0.9 * fabs(pd2) / sqrt(p_body.norm());
 
@@ -803,7 +856,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
                 normvec->points[i].x = pabcd(0);
                 normvec->points[i].y = pabcd(1);
                 normvec->points[i].z = pabcd(2);
-                normvec->points[i].intensity = pd2;
+                normvec->points[i].intensity = pd2;// / sqrt(pabcd(0)*pabcd(0) + pabcd(1)*pabcd(1) + pabcd(2)*pabcd(2));   // This is the real signed distance. Positive if point is on the same side of normal plane vector
+                // std::cout << "sqrt of plane: " << sqrt(pabcd(0)*pabcd(0) + pabcd(1)*pabcd(1) + pabcd(2)*pabcd(2)) << std::endl;
                 res_last[i] = abs(pd2);
             }
         }
@@ -827,7 +881,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         ekfom_data.valid = false;
         std::cerr << "No Effective Points!" << std::endl;
         // ROS_WARN("No Effective Points! \n");
-        return;
+        return; // NOTE: I HAVE TO REMOVE THIS RETURN TO BE ABLE TO FILL THE MATRICES BELOW IF I CHOOSE TO RELY ON THE ODOMETRY (look at esekfom.hpp, line 1639)
+        // effct_feat_num = 0; // I use only px4 odometry
     }
 
     res_mean_last = total_residual / effct_feat_num;
@@ -835,11 +890,12 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num + 3, 29); // 23 33
-    ekfom_data.h.resize(effct_feat_num + 3);
-    ekfom_data.z.resize(effct_feat_num + 3);
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num + 3 + 3 + 3, 29); // 23 33
+    ekfom_data.h.resize(effct_feat_num + 3 + 3 + 3);
+    ekfom_data.z.resize(effct_feat_num + 3 + 3 + 3);
     ekfom_data.z.setZero();
-    ekfom_data.R.resize(effct_feat_num + 3, effct_feat_num + 3);
+    // Building R in an intelligent way (otherwise is huge): the first element is the noise cov of the lidar, the 2nd, 3rd and 4th are noise cov of x, y and z position, and last 3 are vel cov
+    ekfom_data.R.resize(1 + 3 + 3 + 3, 1 + 3 + 3 + 3);
     ekfom_data.R.setZero();
 
     for (int i = 0; i < effct_feat_num; i++)
@@ -870,14 +926,51 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         }
 
         /*** Measuremnt: distance to the closest surface/corner ***/
-        ekfom_data.h(i) = -norm_p.intensity;
+        // ekfom_data.h(i) = -norm_p.intensity;        // This is equal to pd2
+        ekfom_data.h(i) = norm_p.intensity;        // This is equal to pd2
     }
-    // ekfom_data.h.tail(3)= s.rot_gps_imu * s.pos + s.pos_gps_imu - s.bias_gps;  // noise_gps
-    ekfom_data.h.tail(3) = s.rot_gps_imu * s.pos + s.pos_gps_imu; //s.rot_gps_imu * s.pos + s.pos_gps_imu;  // estimated measurement = residual (z in the paper)
-    ekfom_data.z.tail(3) = Measures.px4_position;   // THIS IS THE MEASUREMENT FROM MAVROS! put here the element taken from the odom_buffer deque directly as it is global variable
+
+    // // Discarding lidar measurements and using only PX4 odometry
+    // ekfom_data.R.resize(9, 9);
+    // ekfom_data.R.setZero();
+    // ekfom_data.h_x = MatrixXd::Zero(9, 29);
+    // ekfom_data.h.resize(9);
+    // ekfom_data.z.resize(9);
+    // ekfom_data.z.setZero();
+
+    ekfom_data.h.segment(effct_feat_num, 3) = s.rot_gps_imu * s.pos + s.pos_gps_imu;
+    ekfom_data.z.segment(effct_feat_num, 3) = Measures.px4_position;
+    // // NOTE: When ignoring scan use these two lines below:
+    // ekfom_data.h.head(3) = s.pos; // s.rot_gps_imu * s.pos + s.pos_gps_imu;
+    // ekfom_data.z.head(3) = Measures.px4_position;
+
+    // Only imaginary part of the quaternion is considered (it is a unit quaternion)
+    Matrix3d gps_rot = s.rot_gps_imu.toRotationMatrix() * s.rot.toRotationMatrix();
+    ekfom_data.h.segment(3 + effct_feat_num, 3) = Quaterniond(gps_rot).normalized().vec();   // Not sure about the rotation order...
+    ekfom_data.z.segment(3 + effct_feat_num, 3) = Measures.px4_pose.normalized().vec();
+    // Trying with euler angles:
+    // ekfom_data.h.segment(3 + effct_feat_num, 3) = (s.rot/* * s.rot_gps_imu */).toRotationMatrix().eulerAngles(0, 1, 2);
+    // ekfom_data.z.segment(3 + effct_feat_num, 3) = Measures.px4_pose.toRotationMatrix().eulerAngles(0, 1, 2);
+    // // NOTE: When ignoring scan use these two lines below:
+    // ekfom_data.h.segment(3, 3) = (s.rot * s.rot_gps_imu).normalized().vec();
+    // ekfom_data.z.segment(3, 3) = Measures.px4_pose.normalized().vec();
+
+    ekfom_data.h.tail(3) = s.rot_gps_imu * s.vel; //s.rot_gps_imu * s.pos + s.pos_gps_imu;  // estimated measurement = residual (z in the paper)
+    ekfom_data.z.tail(3) = Measures.px4_velocity;   // THIS IS THE MEASUREMENT FROM MAVROS! put here the element taken from the odom_buffer deque directly as it is global variable
+    // std::cout << "------------- MEASUREMENTS -------------\nh is:\n" << ekfom_data.h.tail(9) << "\nz is:\n" << ekfom_data.z.tail(9) << std::endl;
+
+    // Now filling h_x where needed
     M3D ROT_gps_imu(s.rot_gps_imu);
     ekfom_data.h_x.block<3, 3>(effct_feat_num, 0) << ROT_gps_imu;
-    // M3D POS = s.pos.asDiagonal();
+    ekfom_data.h_x.block<3, 3>(effct_feat_num + 6, 12) << ROT_gps_imu;
+    ekfom_data.h_x.block<3, 3>(effct_feat_num + 3, 3) << ROT_gps_imu;
+    // NOTE: When ignoring scan use these three lines below:
+    // ekfom_data.h_x.block<3, 3>(0, 0) << Matrix3d::Identity();// ROT_gps_imu;
+    // ekfom_data.h_x.block<3, 3>(3, 3) << Matrix3d::Identity(); //ROT_gps_imu;
+    // ekfom_data.h_x.block<3, 3>(6, 12) << Matrix3d::Identity(); //ROT_gps_imu;
+
+    // std::cout << "h_x is:\n" << ekfom_data.h_x << std::endl;
+    // // M3D POS = s.pos.asDiagonal();
     if (extrinsic_est_en)
     {
         // If we chose to estimate the extrinsics, we populate the h_x matrix in the positions relative to the derivatives wrt those extrinsics
@@ -885,17 +978,43 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         pos_crossmat << SKEW_SYM_MATRX(s.pos);
         ekfom_data.h_x.block<3, 3>(effct_feat_num, 23) << -ROT_gps_imu * pos_crossmat;// - POS;
         ekfom_data.h_x.block<3, 3>(effct_feat_num, 26) << Eigen::Matrix3d::Identity();
-    }
-    ekfom_data.R.block(0, 0, effct_feat_num, effct_feat_num) = LASER_POINT_COV * VectorXd::Ones(effct_feat_num).asDiagonal();
+        Matrix3d vel_crossmat;
+        vel_crossmat << SKEW_SYM_MATRX(s.vel);
+        ekfom_data.h_x.block<3, 3>(effct_feat_num + 6, 23) << -ROT_gps_imu * vel_crossmat;
+        ekfom_data.h_x.block<3, 3>(effct_feat_num + 3, 23) = s.rot.toRotationMatrix();
+    }    
     
     if (use_ekf2_cov)
     {
         // Use the covariance on the position given directly by the PX4 EKF
-        ekfom_data.R.bottomRightCorner(3, 3) = Measures.px4_position_cov;
+        VectorXd covariance_vec(1 + 3 + 3 + 3);
+        covariance_vec << LASER_POINT_COV,
+                            Measures.px4_position_cov(0,0),
+                            Measures.px4_position_cov(1,1),
+                            Measures.px4_position_cov(2,2),
+                            Measures.px4_pose_cov(0,0),
+                            Measures.px4_pose_cov(1,1),
+                            Measures.px4_pose_cov(2,2),
+                            Measures.px4_velocity_cov(0,0),
+                            Measures.px4_velocity_cov(1,1),
+                            Measures.px4_velocity_cov(2,2);
+        ekfom_data.R = covariance_vec.asDiagonal();
     }
     else
     {
-        ekfom_data.R.bottomRightCorner(3, 3) = Vector3d(MEAS_NOISE_COV_X, MEAS_NOISE_COV_Y, MEAS_NOISE_COV_Z).asDiagonal();    // The value is high because the odometry from px4 has LOW ACCURACY!
+        VectorXd covariance_vec(1 + 3 + 3 + 3);
+        covariance_vec << LASER_POINT_COV,
+                            MEAS_NOISE_COV_X,
+                            MEAS_NOISE_COV_Y,
+                            MEAS_NOISE_COV_Z,
+                            MEAS_NOISE_COV_Q_X,
+                            MEAS_NOISE_COV_Q_Y,
+                            MEAS_NOISE_COV_Q_Z,
+                            MEAS_NOISE_COV_VEL_X,
+                            MEAS_NOISE_COV_VEL_Y,
+                            MEAS_NOISE_COV_VEL_Z;
+        ekfom_data.R = covariance_vec.asDiagonal();            // The value is high because the odometry from px4 has LOW ACCURACY!
+        // std::cout << "R is:\n" << ekfom_data.R << std::endl;
     }
     /* 
         Matrix h_v is not implemented.
@@ -934,7 +1053,15 @@ public:
         this->declare_parameter<double>("mapping.measurement_noise_covariance_x", 0.1);
         this->declare_parameter<double>("mapping.measurement_noise_covariance_y", 0.1);
         this->declare_parameter<double>("mapping.measurement_noise_covariance_z", 0.1);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_vel_x", 0.1);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_vel_y", 0.1);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_vel_z", 0.1);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_q_x", 0.0001);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_q_y", 0.0001);
+        this->declare_parameter<double>("mapping.measurement_noise_covariance_q_z", 0.0001);
+        this->declare_parameter<bool>("mapping.use_odometry_in", false);
         this->declare_parameter<bool>("mapping.use_ekf2_covariance", false);
+        this->declare_parameter<double>("mapping.lidar_covariance", 0.001);
         this->declare_parameter<double>("preprocess.blind", 0.01);
         this->declare_parameter<int>("preprocess.lidar_type", AVIA);
         this->declare_parameter<int>("preprocess.scan_line", 16);
@@ -974,7 +1101,15 @@ public:
         this->get_parameter_or<double>("mapping.measurement_noise_covariance_x", MEAS_NOISE_COV_X, 0.1);
         this->get_parameter_or<double>("mapping.measurement_noise_covariance_y", MEAS_NOISE_COV_Y, 0.1);
         this->get_parameter_or<double>("mapping.measurement_noise_covariance_z", MEAS_NOISE_COV_Z, 0.1);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_vel_x", MEAS_NOISE_COV_VEL_X, 0.1);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_vel_y", MEAS_NOISE_COV_VEL_Y, 0.1);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_vel_z", MEAS_NOISE_COV_VEL_Z, 0.1);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_q_x", MEAS_NOISE_COV_Q_X, 0.1);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_q_y", MEAS_NOISE_COV_Q_Y, 0.1);
+        this->get_parameter_or<double>("mapping.measurement_noise_covariance_q_z", MEAS_NOISE_COV_Q_Z, 0.1);
+        this->get_parameter_or<bool>("mapping.use_odometry_in", use_odom_in, false);
         this->get_parameter_or<bool>("mapping.use_ekf2_covariance", use_ekf2_cov, false);
+        this->get_parameter_or<double>("mapping.lidar_covariance", LASER_POINT_COV, 0.001);
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.lidar_type", p_pre->lidar_type, AVIA);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
@@ -1019,7 +1154,7 @@ public:
         p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
         p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
 
-        fill(epsi, epsi+23, 0.001);
+        fill(epsi, epsi+29, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         /*** debug record ***/
@@ -1049,8 +1184,14 @@ public:
         auto qos = rclcpp::QoS(rclcpp::QoSInitialization(qos_profile.history, 5), qos_profile);
 
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
-        // sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/local_position/odom", qos, odom_cbk);
-        sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/odometry/in", qos, odom_cbk);   // odometry/in has the covariance data given by the PX4 EKF
+        if (use_odom_in)
+        {
+            sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/odometry/in", qos, odom_cbk);   // odometry/in has the covariance data given by the PX4 EKF
+        }
+        else
+        {
+            sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/local_position/odom", qos, odom_cbk);
+        }
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
@@ -1106,7 +1247,7 @@ private:
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_WARN(this->get_logger(), "No point, skip this scan! (Zero undistorted features)\n");
                 return;
             }
 
@@ -1144,7 +1285,7 @@ private:
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_WARN(this->get_logger(), "No point, skip this scan! (Too few undistorted features)\n");
                 return;
             }
             
@@ -1273,7 +1414,7 @@ private:
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
-    double epsi[23] = {0.001};
+    double epsi[29] = {0.001};
 
     FILE *fp;
     ofstream fout_pre, fout_out, fout_dbg;

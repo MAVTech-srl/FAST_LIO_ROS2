@@ -61,8 +61,10 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     double lidar_end_time;
     PointCloudXYZI::Ptr lidar;
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
-    Vector3d px4_position;
-    Matrix3d px4_position_cov;
+    Vector3d px4_position, px4_velocity;
+    Matrix3d px4_position_cov, px4_velocity_cov, px4_pose_cov, px4_angular_speed_cov;
+    Quaterniond px4_pose;
+    Vector3d px4_angular_speed;
 };
 
 struct StatesGroup
@@ -237,10 +239,13 @@ bool esti_plane(Matrix<T, 4, 1> &pca_result, const PointVector &point, const T &
         A(j,1) = point[j].y;
         A(j,2) = point[j].z;
     }
+    // std::cout << "Points for plane esti:\n" << A << std::endl;
 
     Matrix<T, 3, 1> normvec = A.colPivHouseholderQr().solve(b);
 
     T n = normvec.norm();
+    // Now I normalize the normal to the plane vector [a/d; b/d; c/d] by sqrt(a² + b² + c²) so that its length becomes 1/d, letting me find d as 1/sqrt(a² + b² + c²)
+    // NOTE that here it is NOT perfoming PCA/SVD for fitting the plane to the points, but Least Squares (faster but minimizes vertical distance and not orthogonal dist)
     pca_result(0) = normvec(0) / n;
     pca_result(1) = normvec(1) / n;
     pca_result(2) = normvec(2) / n;
