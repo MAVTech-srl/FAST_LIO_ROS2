@@ -1742,18 +1742,9 @@ public:
 
 			
 				// Our code
-				VectorXd R_diagonal = VectorXd(dof_Measurement);
-				R_diagonal << VectorXd::Constant(dof_Measurement - 9, R(0,0)), 
-								R(1,1),
-								R(2,2), 
-								R(3,3),
-								R(4,4),
-								R(5,5),
-								R(6,6),
-								R(7,7),
-								R(8,8),
-								R(9,9);
-				// R_diagonal << 	R(1,1), 
+				// VectorXd R_diagonal = VectorXd(dof_Measurement);
+				// R_diagonal << VectorXd::Constant(dof_Measurement - 9, R(0,0)), 
+				// 				R(1,1),
 				// 				R(2,2), 
 				// 				R(3,3),
 				// 				R(4,4),
@@ -1761,8 +1752,23 @@ public:
 				// 				R(6,6),
 				// 				R(7,7),
 				// 				R(8,8),
-				// 				R(9,9); // If I am discarding the lidar measurements
-				K_ = P_ * h_x_.transpose() * (h_x_ * P_ * h_x_.transpose() + R_diagonal.asDiagonal().toDenseMatrix()).inverse();	// It's ok to invert R because we have small matrices here
+				// 				R(9,9);
+				// // R_diagonal << 	R(1,1), 
+				// // 				R(2,2), 
+				// // 				R(3,3),
+				// // 				R(4,4),
+				// // 				R(5,5),
+				// // 				R(6,6),
+				// // 				R(7,7),
+				// // 				R(8,8),
+				// // 				R(9,9); // If I am discarding the lidar measurements
+				// K_ = P_ * h_x_.transpose() * (h_x_ * P_ * h_x_.transpose() + R_diagonal.asDiagonal().toDenseMatrix()).inverse();	// It's ok to invert R because we have small matrices here
+				// I need to reconstruct the matrix R
+				MatrixXd R_reconstructed(dof_Measurement, dof_Measurement);
+				R_reconstructed.setZero();
+				R_reconstructed.diagonal() = VectorXd::Constant(dof_Measurement, R(0,0));
+				R_reconstructed.bottomRightCorner(9, 9) = R.bottomRightCorner(9, 9);
+				K_ = P_ * h_x_.transpose() * (h_x_ * P_ * h_x_.transpose() + R_reconstructed).inverse();
 				K_h = K_ * dyn_share.h;
 				K_x = K_ * h_x_;
 			}
@@ -1820,18 +1826,9 @@ public:
 				// //K_= (h_x_.transpose() * h_x_ + (P_/R).inverse()).inverse()*h_x_.transpose();
 
 				// Our code
-				VectorXd inv_R_diagonal = VectorXd(dof_Measurement);
-				inv_R_diagonal << VectorXd::Constant(dof_Measurement - 9, 1 / R(0,0)), 
-									1 / R(1,1), 
-									1 / R(2,2), 
-									1 / R(3,3),
-									1 / R(4,4),
-									1 / R(5,5),
-									1 / R(6,6),
-									1 / R(7,7),
-									1 / R(8,8),
-									1 / R(9,9);
-				// inv_R_diagonal << 1 / R(1,1), 
+				// VectorXd inv_R_diagonal = VectorXd(dof_Measurement);
+				// inv_R_diagonal << VectorXd::Constant(dof_Measurement - 9, 1 / R(0,0)), 
+				// 					1 / R(1,1), 
 				// 					1 / R(2,2), 
 				// 					1 / R(3,3),
 				// 					1 / R(4,4),
@@ -1840,7 +1837,26 @@ public:
 				// 					1 / R(7,7),
 				// 					1 / R(8,8),
 				// 					1 / R(9,9);
-				K_ = (h_x_.transpose() * inv_R_diagonal.asDiagonal().toDenseMatrix() * h_x_ + P_.inverse()).inverse() * h_x_.transpose() * inv_R_diagonal.asDiagonal();
+				// // inv_R_diagonal << 1 / R(1,1), 
+				// // 					1 / R(2,2), 
+				// // 					1 / R(3,3),
+				// // 					1 / R(4,4),
+				// // 					1 / R(5,5),
+				// // 					1 / R(6,6),
+				// // 					1 / R(7,7),
+				// // 					1 / R(8,8),
+				// // 					1 / R(9,9);
+				// K_ = (h_x_.transpose() * inv_R_diagonal.asDiagonal().toDenseMatrix() * h_x_ + P_.inverse()).inverse() * h_x_.transpose() * inv_R_diagonal.asDiagonal();
+				// Reconstruct matrix R
+				MatrixXd inv_R_reconstructed(dof_Measurement, dof_Measurement);
+				inv_R_reconstructed.setZero();
+				inv_R_reconstructed.diagonal() = VectorXd::Constant(dof_Measurement, 1 / R(0,0));
+				// inv_R_reconstructed.bottomRightCorner(9, 9) = R.bottomRightCorner(9, 9).inverse();
+				// The inverse of a block matrix is the matrix with all blocks inverted
+				inv_R_reconstructed.block<3, 3>(dof_Measurement - 9, dof_Measurement - 9) = R.block<3, 3>(1, 1).inverse();
+				inv_R_reconstructed.block<3, 3>(dof_Measurement - 6, dof_Measurement - 6) = R.block<3, 3>(4, 4).inverse();
+				inv_R_reconstructed.block<3, 3>(dof_Measurement - 3, dof_Measurement - 3) = R.block<3, 3>(7, 7).inverse();
+				K_ = (h_x_.transpose() * inv_R_reconstructed * h_x_ + P_.inverse()).inverse() * h_x_.transpose() * inv_R_reconstructed;
 				K_h = K_ * dyn_share.h;
 				K_x = K_ * h_x_;
 			#endif 

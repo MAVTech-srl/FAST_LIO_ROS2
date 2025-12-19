@@ -86,7 +86,7 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic;
+string map_file_path, lid_topic, imu_topic, odom_topic;
 
 std::random_device rd;
 std::mt19937 e2(rd());
@@ -475,32 +475,34 @@ bool sync_packages(MeasureGroup &meas)
         imu_buffer.pop_front();
     }
 
-    // Push odometry data if there's any new
+    // Push odometry data
+    // Retrieve covariance matrices and map them into Eigen objects
+    MatrixXd px4_pose_covariance = Map<const MatrixXd>(odom_buffer.front()->pose.covariance.data(), 6, 6);
+    MatrixXd px4_twist_covariance = Map<const MatrixXd>(odom_buffer.front()->twist.covariance.data(), 6, 6);
     if (odom_msg_count == 0)
     {
         // if (odom_buffer.empty()) return false;
         meas.px4_position = VectorXd::Zero(3);
-        meas.px4_position_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
-                                            odom_buffer.front()->pose.covariance[7],
-                                            odom_buffer.front()->pose.covariance[14]).asDiagonal();
+        meas.px4_position_cov = px4_pose_covariance.topLeftCorner(3, 3);
         meas.px4_velocity = Vector3d(odom_buffer.front()->twist.twist.linear.x,
                                         odom_buffer.front()->twist.twist.linear.y,
                                         odom_buffer.front()->twist.twist.linear.z);
-        meas.px4_velocity_cov = Vector3d(odom_buffer.front()->twist.covariance[0],
-                                            odom_buffer.front()->twist.covariance[7],
-                                            odom_buffer.front()->twist.covariance[14]).asDiagonal();
+        meas.px4_velocity_cov = px4_twist_covariance.topLeftCorner(3, 3);
+        // Save initial position bias
         initial_position << odom_buffer.front()->pose.pose.position.x,
                             odom_buffer.front()->pose.pose.position.y,
                             odom_buffer.front()->pose.pose.position.z;
-        // Save initial orientation
+        // Save initial orientation bias
         initial_orientation = Quaterniond(odom_buffer.front()->pose.pose.orientation.w,
                                 odom_buffer.front()->pose.pose.orientation.x,
                                 odom_buffer.front()->pose.pose.orientation.y,
                                 odom_buffer.front()->pose.pose.orientation.z);
         meas.px4_pose = Quaterniond(1.0, 0.0, 0.0, 0.0);
+        meas.px4_pose_cov = px4_pose_covariance.bottomRightCorner(3, 3);
         meas.px4_angular_speed = Vector3d(odom_buffer.front()->twist.twist.angular.x,
                                             odom_buffer.front()->twist.twist.angular.y,
                                             odom_buffer.front()->twist.twist.angular.z);
+        meas.px4_angular_speed_cov = px4_twist_covariance.bottomRightCorner(3, 3);
         std::cout << "Initial position:\n" << initial_position << "\nInitial pose:\n" << initial_orientation << std::endl;
         odom_buffer.pop_front();
         odom_msg_count++;
@@ -517,24 +519,27 @@ bool sync_packages(MeasureGroup &meas)
                                             odom_buffer.front()->pose.pose.position.y, // + dist(e2),
                                             odom_buffer.front()->pose.pose.position.z); // + dist(e2));
                 meas.px4_position = actual_position - initial_position;
-                meas.px4_position_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
-                                            odom_buffer.front()->pose.covariance[7],
-                                            odom_buffer.front()->pose.covariance[14]).asDiagonal();
+                // meas.px4_position_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
+                //                             odom_buffer.front()->pose.covariance[7],
+                //                             odom_buffer.front()->pose.covariance[14]).asDiagonal();
+                meas.px4_position_cov = px4_pose_covariance.topLeftCorner(3, 3);
                 // Populate linear velocity
                 meas.px4_velocity = Vector3d(odom_buffer.front()->twist.twist.linear.x,
                                                 odom_buffer.front()->twist.twist.linear.y,
                                                 odom_buffer.front()->twist.twist.linear.z);
-                meas.px4_velocity_cov = Vector3d(odom_buffer.front()->pose.covariance[0],
-                                            odom_buffer.front()->pose.covariance[7],
-                                            odom_buffer.front()->pose.covariance[14]).asDiagonal();
+                // meas.px4_velocity_cov = Vector3d(odom_buffer.front()->twist.covariance[0],
+                //                             odom_buffer.front()->twist.covariance[7],
+                //                             odom_buffer.front()->twist.covariance[14]).asDiagonal();
+                meas.px4_velocity_cov = px4_twist_covariance.topLeftCorner(3, 3);
                 // Populate pose
                 meas.px4_pose = Quaterniond(odom_buffer.front()->pose.pose.orientation.w,
                                             odom_buffer.front()->pose.pose.orientation.x,
                                             odom_buffer.front()->pose.pose.orientation.y,
                                             odom_buffer.front()->pose.pose.orientation.z);
-                meas.px4_pose_cov = Vector3d(odom_buffer.front()->pose.covariance[21],
-                                            odom_buffer.front()->pose.covariance[28],
-                                            odom_buffer.front()->pose.covariance[35]).asDiagonal();
+                // meas.px4_pose_cov = Vector3d(odom_buffer.front()->pose.covariance[21],
+                //                             odom_buffer.front()->pose.covariance[28],
+                //                             odom_buffer.front()->pose.covariance[35]).asDiagonal();
+                meas.px4_pose_cov = px4_pose_covariance.bottomRightCorner(3, 3);
                 // NOTE: SUBTRACT THE INITIAL ORIENTATION!
                 // This is an extrinsic rotation because I want to apply the initial rotation (inversed) to the actual axes wrt inertial RF
                 Matrix3d actual_pose = initial_orientation.normalized().toRotationMatrix().transpose() * meas.px4_pose.normalized().toRotationMatrix();
@@ -544,6 +549,7 @@ bool sync_packages(MeasureGroup &meas)
                 meas.px4_angular_speed = Vector3d(odom_buffer.front()->twist.twist.angular.x,
                                                     odom_buffer.front()->twist.twist.angular.y,
                                                     odom_buffer.front()->twist.twist.angular.z);    // BUG: Maybe this is wrong because it does not take into account the initial orientation bias!!
+                meas.px4_angular_speed_cov = px4_twist_covariance.bottomRightCorner(3, 3);
                 // // Now rotate it to align with the lidar RF
                 // Eigen::Quaterniond q(-0.4231, 0.5666, 0.5666, 0.4231);     // Order: w, x, y, z
                 // Matrix3d rot_mat = q.normalized().toRotationMatrix();
@@ -987,18 +993,22 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     if (use_ekf2_cov)
     {
         // Use the covariance on the position given directly by the PX4 EKF
-        VectorXd covariance_vec(1 + 3 + 3 + 3);
-        covariance_vec << LASER_POINT_COV,
-                            Measures.px4_position_cov(0,0),
-                            Measures.px4_position_cov(1,1),
-                            Measures.px4_position_cov(2,2),
-                            Measures.px4_pose_cov(0,0),
-                            Measures.px4_pose_cov(1,1),
-                            Measures.px4_pose_cov(2,2),
-                            Measures.px4_velocity_cov(0,0),
-                            Measures.px4_velocity_cov(1,1),
-                            Measures.px4_velocity_cov(2,2);
-        ekfom_data.R = covariance_vec.asDiagonal();
+        // VectorXd covariance_vec(1 + 3 + 3 + 3);
+        // covariance_vec << LASER_POINT_COV,
+        //                     Measures.px4_position_cov(0,0),
+        //                     Measures.px4_position_cov(1,1),
+        //                     Measures.px4_position_cov(2,2),
+        //                     Measures.px4_pose_cov(0,0),
+        //                     Measures.px4_pose_cov(1,1),
+        //                     Measures.px4_pose_cov(2,2),
+        //                     Measures.px4_velocity_cov(0,0),
+        //                     Measures.px4_velocity_cov(1,1),
+        //                     Measures.px4_velocity_cov(2,2);
+        ekfom_data.R(0, 0) = LASER_POINT_COV;
+        ekfom_data.R.block<3, 3>(1, 1) = Measures.px4_position_cov;
+        ekfom_data.R.block<3, 3>(4, 4) = Measures.px4_pose_cov;
+        ekfom_data.R.block<3, 3>(7, 7) = Measures.px4_velocity_cov;
+        // ekfom_data.R = covariance_vec.asDiagonal();
     }
     else
     {
@@ -1038,6 +1048,7 @@ public:
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
+        this->declare_parameter<string>("common.odom_topic", "/mavros/local_position/odom");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
         this->declare_parameter<double>("filter_size_corner", 0.5);
@@ -1086,6 +1097,7 @@ public:
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
+        this->get_parameter_or<string>("common.odom_topic", odom_topic, "/mavros/local_position/odom");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
@@ -1186,11 +1198,11 @@ public:
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
         if (use_odom_in)
         {
-            sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/odometry/in", qos, odom_cbk);   // odometry/in has the covariance data given by the PX4 EKF
+            sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>(odom_topic, qos, odom_cbk);   // odometry/in has the covariance data given by the PX4 EKF
         }
         else
         {
-            sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>("/mavros/local_position/odom", qos, odom_cbk);
+            sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>(odom_topic, qos, odom_cbk);
         }
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);

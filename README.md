@@ -1,3 +1,18 @@
+# FAST-LIO with external odometry
+
+This repo builds on top of the beautiful work done by Hong Kong University. It is a fork of this repo maintained by [Ericsiii](https://github.com/Ericsii), who translated the ROS1 original fast-lio package into ROS2 package.
+>**FAST-LIO** (Fast LiDAR-Inertial Odometry) is a computationally efficient and robust LiDAR-inertial odometry package. It fuses LiDAR feature points with IMU data using a tightly-coupled iterated extended Kalman filter to allow robust navigation in fast-motion, noisy or cluttered environments where degeneration occurs. Our package address many key issues:
+>1. Fast iterated Kalman filter for odometry optimization;
+>2. Automaticaly initialized at most steady environments;
+>3. Parallel KD-Tree Search to decrease the computation.
+
+This fork allows to fuse the information of an external odometry (e.g.: from an autopilot, VIO system, MoCap system, ...) into the fast-lio Kalman filter.
+
+**Contributors**
+
+[Davide](https://github.com/DavideCarminati)</br>
+[Sanem](https://github.com/sanemildizz)
+___
 > ROS2 Fork repo maintainer: [Ericsiii](https://github.com/Ericsii)
 
 ## Related Works and Extended Application

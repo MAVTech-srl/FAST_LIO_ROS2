@@ -15,6 +15,8 @@
             # imu_topic: "/livox/lidar/imu" # Only for Gazebo SITL
             lid_topic:  "/livox/lidar"
             imu_topic:  "/livox/imu"
+            # odom_topic: "/mavros/local_position/odom"
+            odom_topic: "/mavros/odometry/in"       # Use this topic if you want to use as R the covariance of the PX4 ekf2 filter
             time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
